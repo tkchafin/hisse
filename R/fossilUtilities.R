@@ -45,7 +45,8 @@ GetEdgeCombined <- function(phy) {
 }
 
 
-GetFossils <- function(phy, psi=0.1, edge_combined=NULL) {
+GetFossils <- function(phy, psi=0.1) {
+    edge_combined=NULL
     if(is.null(edge_combined)) {
         edge_combined <- GetEdgeCombined(phy)
     }
@@ -71,23 +72,31 @@ GetFossils <- function(phy, psi=0.1, edge_combined=NULL) {
 
 	# loop to find k fossils that have sampled descendants from branches that are extinct
 	for (i in sequence(nrow(fossils))) {
-		all_descendants <- phangorn::Descendants(phy, fossils$tipwardnode[i], type="all")[[1]]
-		all_descendants <- all_descendants[which(all_descendants>ape::Ntip(phy))] # so we only look at the internal nodes
+		all_descendants <- phangorn::Descendants(phy, fossils$tipwardnode[i], type="all")
+#		all_descendants <- all_descendants[which(all_descendants>ape::Ntip(phy))] # so we only look at the internal nodes
 		other_fossils <- subset(fossils, fossils$tipwardnode!=fossils$tipwardnode[i])
 		if(length(all_descendants)>0) {
 			if(any(all_descendants %in% other_fossils$rootwardnode)) {
 				fossils$has_sampled_descendant[i] <- TRUE
 			}
+            if(any(fossils$tipwardnode[i] %in% other_fossils$rootwardnode)) {
+                fossils$has_sampled_descendant[i] <- TRUE
+            }
 		}
 	}
-
+	
+    #fossils$fossiltype_mk <- NA
+    #fossils$fossiltype_mk[which(fossils$fossiltype_long=="extinct_terminal")] <- "m"
+    #fossils$fossiltype_mk[which(fossils$fossiltype_long=="extinct_internal" & !fossils$has_sampled_descendant)] <- "m"
+    #fossils$fossiltype_mk[which(fossils$fossiltype_long=="extinct_internal" & fossils$has_sampled_descendant)] <- "k"
+    
     fossils <- fossils[order(fossils$timefrompresent),]
     
     return(fossils)
 }
 
 
-ProcessSimSample <- function(phy, f, keep.root.samples=FALSE){
+ProcessSimSample <- function(phy, f){
     
     #Step 1: Get MRCA of K samples for table. We want MRCA1, MRCA2, TIMEFROMPRESENT, Trait
     k.samples <- f[which(f$has_sampled_descendant == TRUE),]
@@ -181,6 +190,7 @@ ProcessSimSample <- function(phy, f, keep.root.samples=FALSE){
     
     k.samples <- data.frame(taxon1=tmp[,1], taxon2=tmp[,2], timefrompresent=tmp[,3], stringsAsFactors=FALSE)
     
+    keep.root.samples=FALSE
     if(keep.root.samples == FALSE){
         root.edge.samples <- which(as.numeric(k.samples[,3]) > max(node.depth.edgelength(new.tree)))
         if(length(root.edge.samples)>0){
