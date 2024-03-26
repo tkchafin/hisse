@@ -1241,7 +1241,7 @@ ConvertManyToMultiState <- function(hisse.results, which.element, AIC.weights=NU
 
 
 GetAICWeights <- function(hisse.results, criterion="AIC") {
-    if(class(hisse.results)=="misse.states") {
+    if(inherits(hisse.results, what="misse.states")) {
         hisse.results <- list(hisse.results)
     }
     AIC.vector <- sapply(hisse.results, "[[", criterion)
@@ -1254,7 +1254,7 @@ GetAICWeights <- function(hisse.results, criterion="AIC") {
 
 GetRateRange <- function(x, rate.param) {
     hisse.results <- x
-    if(class(hisse.results)=="hisse.states") { #we have to make a list so we can run this generally
+    if(inherits(hisse.results, what="hisse.states")) { #we have to make a list so we can run this generally
         tmp.list <- list()
         tmp.list[[1]] <- hisse.results
         hisse.results <- tmp.list
@@ -1267,4 +1267,101 @@ GetRateRange <- function(x, rate.param) {
 GetRelevantRowEntries <- function(x, rate.param) {
     return(x[which(rownames(x)==rate.param),])
 }
+
+
+PlotMisseSpace <- function(x, possible.combos=NULL, arrows.by.weight=FALSE, ...){
+    if(!is.null(x)){
+        tmp <- c()
+        for(model.index in 1:length(x)){
+            tmp <- rbind(tmp, c(length(unique(x[[model.index]]$turnover)), length(unique(x[[model.index]]$eps)), x[[model.index]]$loglik, x[[model.index]]$AICc))
+        }
+        model.space <- data.frame(turnover=tmp[,1], eps=tmp[,2], loglik=tmp[,3], aic=tmp[,4])
+        nodes <- paste("T", model.space[,1], "_", "E", model.space[,2], sep="")
+        edges <- GetEdges(model.space[,1], model.space[,2], nodes)
+        node.size <- setNames(GetAICWeights(x), nodes)
+        node.size <- sqrt(node.size)/max(sqrt(node.size))
+        if(arrows.by.weight == TRUE){
+            edges.tmp <- as.matrix(edges)
+            for(row.index in 1:dim(edges.tmp)[1]){
+                if(node.size[which(names(node.size) == edges.tmp[row.index,1])] > node.size[which(names(node.size) == edges.tmp[row.index,2])]){
+                    tmp.vec <- c(edges.tmp[row.index,1], edges.tmp[row.index,2])
+                    edges.tmp[row.index,1] <- as.character(tmp.vec[2])
+                    edges.tmp[row.index,2] <- as.character(tmp.vec[1])
+                }
+            }
+            edges <- data.frame(x=edges.tmp[,1], y=edges.tmp[,2], weight=1)
+        }
+        graph.df <- graph.data.frame(edges, vertices=nodes)
+        plot(graph.df, vertex.size=10*node.size, ...)
+    }else{
+        tmp <- c()
+        model.space <- possible.combos
+        nodes <- paste("T", model.space[,1], "_", "E", model.space[,2], sep="")
+        edges <- GetEdges(model.space[,1], model.space[,2], nodes)
+        graph.df <- graph.data.frame(edges, vertices=nodes)
+        plot(graph.df, ...)
+    }
+}
+
+
+######################################################################################################################################
+######################################################################################################################################
+### Adds Sampled Fossil Points and Intervals to a Phylo Plot
+######################################################################################################################################
+######################################################################################################################################
+
+getphylo_x <- function(phy, node) {
+    if(is.character(node)) {
+        node <- which(c(phy$tip.label, phy$node.label)==node)
+    }
+    pi <- phy$edge[phy$edge[,2]==node, 1]
+    if (length(pi)) {
+        ei <- which(phy$edge[,1]==pi & phy$edge[,2]==node)
+        phy$edge.length[ei] + Recall(phy, pi)
+    } else {
+        if(!is.null(phy$root.edge)) {
+            phy$root.edge
+        } else {
+            0
+        }
+    }
+}
+
+
+getphylo_y <- function(phy, node) {
+    if(is.character(node)) {
+        node <- which(c(phy$tip.label, phy$node.label)==node)
+    }
+    ci <- phy$edge[phy$edge[,1]==node, 2]
+    if (length(ci)==2) {
+        mean(c(Recall(phy, ci[1]), Recall(phy, ci[2])))
+    } else if (length(ci)==0) {
+        Ntip <- length(phy$tip.label)
+        which(phy$edge[phy$edge[, 2] <= Ntip, 2] == node)
+    } else {
+        stop(paste("error", length(ci)))
+    }
+}
+
+
+AddFossilPoints <- function(phy, f, ...){
+    for(row.index in 1:dim(f)[1]){
+        #Step 1: get Y coordinates for the tipward:
+        y.tip <- getphylo_y(phy, f$tipwardnode[row.index])
+        #Step 2: Plot the point:
+        points(f$timefromroot[row.index], y.tip, ...)
+    }
+}
+
+
+AddStratIntervals <- function(phy, f, ...){
+    strat.intervals <- GetStratigraphicIntervals(phy, f)
+    for(row.index in 1:dim(strat.intervals)[1]){
+        #Step 1: get Y coordinates for the tipward:
+        y.tip <- getphylo_y(phy, strat.intervals$tipwardnode[row.index])
+        #Step 2: Plot the segments:
+        segments(strat.intervals$startingtimefromroot[row.index], y.tip, strat.intervals$endingtimefromroot[row.index],  y.tip, ...)
+    }
+}
+
 

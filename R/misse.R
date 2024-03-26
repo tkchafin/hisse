@@ -1,24 +1,15 @@
 
 
-#library(ape)
-#library(deSolve)
-#library(subplex)
-#library(phytools)
-#library(nloptr)
-#library(GenSA)
-#library(data.table)
-#dyn.load("misse-ext-derivs.so")
-#dyn.load("birthdeath-ext-derivs.so")
-
 ######################################################################################################################################
 ######################################################################################################################################
 ### MiSSE -- Examines shifts in diversification in relation to hidden states ONLY
 ######################################################################################################################################
 ######################################################################################################################################
 
-MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, condition.on.survival=TRUE, root.type="madfitz", root.p=NULL, includes.fossils=FALSE, k.samples=NULL, sann=TRUE, sann.its=1000, bounded.search=TRUE, max.tol=.Machine$double.eps^.50, starting.vals=NULL, turnover.upper=10000, eps.upper=3, trans.upper=100, restart.obj=NULL, ode.eps=0, dt.threads=1, expand.mode=FALSE){
+MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, condition.on.survival=TRUE, root.type="madfitz", root.p=NULL, includes.fossils=FALSE, k.samples=NULL, strat.intervals=NULL, sann=TRUE, sann.its=5000, sann.temp=5230, sann.seed=-100377, bounded.search=TRUE, max.tol=.Machine$double.eps^.50, starting.vals=NULL, turnover.upper=10000, eps.upper=3, trans.upper=100, restart.obj=NULL, ode.eps=0, dt.threads=1, expand.mode=FALSE){
     
     misse_start_time <- Sys.time()
+    
     #This makes it easier to handle missegreedy with fixed values
     if(length(fixed.eps)>0) {
         if(is.na(fixed.eps)) {
@@ -58,6 +49,14 @@ MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, conditi
     }
     
     setDTthreads(threads=dt.threads)
+    
+    #if(!is.ultrametric(phy) & includes.fossils == FALSE){
+    #    warning("Tree is not ultrametric. Used force.ultrametric() function to coerce the tree to be ultrametric - see note above.")
+    #    edge_details <- GetEdgeDetails(phy, includes.intervals=FALSE, intervening.intervals=NULL)
+    #    if(any(edge_details$type == "extinct_tip")){
+    #        phy <- force.ultrametric(phy)
+    #    }
+    #}
     
     if(sann == FALSE & is.null(starting.vals)){
         warning("You have chosen to rely on the internal starting points that generally work but does not guarantee finding the MLE.")
@@ -109,30 +108,67 @@ MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, conditi
     # Some new prerequisites #
     if(includes.fossils == TRUE){
         if(!is.null(k.samples)){
+            phy.og <- phy
             psi.type <- "m+k"
             split.times <- dateNodes(phy, rootAge=max(node.depth.edgelength(phy)))[-c(1:Ntip(phy))]
-            k.samples <- k.samples[order(as.numeric(k.samples[,3]),decreasing=FALSE),]
+            strat.cache <- NULL
+            k.samples <- k.samples[order(as.numeric(k.samples[,3]), decreasing=FALSE),]
             phy <- AddKNodes(phy, k.samples)
             fix.type <- GetKSampleMRCA(phy, k.samples)
             no.k.samples <- length(k.samples[,1])
+            gen <- FindGenerations(phy)
+            dat.tab <- OrganizeDataMiSSE(phy=phy, f=f, hidden.states=hidden.states, includes.intervals=FALSE, intervening.intervals=NULL, includes.fossils=includes.fossils)
+            #These are all inputs for generating starting values:
+            edge_details <- GetEdgeDetails(phy, includes.intervals=FALSE, intervening.intervals=NULL)
+            fossil.taxa <- edge_details$tipward_node[which(edge_details$type == "extinct_tip")]
+            fossil.ages <- dat.tab$TipwardAge[which(dat.tab$DesNode %in% fossil.taxa)]
+            n.tax.starting <- Ntip(phy)-length(fossil.taxa)-no.k.samples
         }else{
-            psi.type <- "m_only"
-            fix.type <- NULL
-            split.times <- dateNodes(phy, rootAge=max(node.depth.edgelength(phy)))[-c(1:Ntip(phy))]
-            no.k.samples <- 0
+            if(!is.null(strat.intervals)){
+                phy.og <- phy
+                psi.type <- "m+int"
+                split.times.plus.tips <- dateNodes(phy, rootAge=max(node.depth.edgelength(phy)))
+                split.times <- split.times.plus.tips[-c(1:Ntip(phy))]
+                strat.cache <- GetStratInfo(strat.intervals=strat.intervals)
+                k.samples <- GetIntervalToK(strat.intervals, intervening.intervals=strat.cache$intervening.intervals)
+                extinct.tips <- which(round(k.samples$timefrompresent,8) %in% round(split.times.plus.tips[c(1:Ntip(phy))],8))
+                if(length(extinct.tips > 0)){
+                    k.samples <- k.samples[-extinct.tips,]
+                }
+                phy <- AddKNodes(phy, k.samples)
+                fix.type <- GetKSampleMRCA(phy, k.samples, strat.intervals=TRUE)
+                gen <- FindGenerations(phy)
+                dat.tab <- OrganizeDataMiSSE(phy=phy, f=f, hidden.states=hidden.states, includes.intervals=TRUE, intervening.intervals=strat.cache$intervening.intervals, includes.fossils=includes.fossils)
+                #These are all inputs for generating starting values:
+                edge_details <- GetEdgeDetails(phy, includes.intervals=TRUE, intervening.intervals=strat.cache$intervening.intervals)
+                fossil.taxa <- edge_details$tipward_node[which(edge_details$type == "extinct_tip" | edge_details$type == "k_extinct_interval")]
+                fossil.ages <- dat.tab$TipwardAge[which(dat.tab$DesNode %in% fossil.taxa)]
+                n.tax.starting <- Ntip(phy)-length(fossil.taxa)-dim(fix.type)[1]
+            }else{
+                phy.og <- phy
+                psi.type <- "m_only"
+                fix.type <- NULL
+                split.times <- dateNodes(phy, rootAge=max(node.depth.edgelength(phy)))[-c(1:Ntip(phy))]
+                strat.cache <- NULL
+                no.k.samples <- 0
+                gen <- FindGenerations(phy)
+                dat.tab <- OrganizeDataMiSSE(phy=phy, f=f, hidden.states=hidden.states, includes.intervals=FALSE, intervening.intervals=NULL, includes.fossils=includes.fossils)
+                #These are all inputs for generating starting values:
+                edge_details <- GetEdgeDetails(phy, includes.intervals=FALSE, intervening.intervals=NULL)
+                fossil.taxa <- edge_details$tipward_node[which(edge_details$type == "extinct_tip")]
+                fossil.ages <- dat.tab$TipwardAge[which(dat.tab$DesNode %in% fossil.taxa)]
+                n.tax.starting <- Ntip(phy)-length(fossil.taxa)-no.k.samples
+            }
         }
-        gen <- FindGenerations(phy)
-        dat.tab <- OrganizeDataMiSSE(phy=phy, f=f, hidden.states=hidden.states, includes.fossils=includes.fossils)
-        #These are all inputs for generating starting values:
-        fossil.taxa <- which(dat.tab$branch.type == 1)
-        fossil.ages <- dat.tab$TipwardAge[which(dat.tab$branch.type == 1)]
-        n.tax.starting <- Ntip(phy)-length(fossil.taxa)-no.k.samples
+
     }else{
+        phy.og <- phy
         gen <- FindGenerations(phy)
-        dat.tab <- OrganizeDataMiSSE(phy=phy, f=f, hidden.states=hidden.states, includes.fossils=includes.fossils)
+        dat.tab <- OrganizeDataMiSSE(phy=phy, f=f, hidden.states=hidden.states, includes.intervals=FALSE, intervening.intervals=NULL, includes.fossils=includes.fossils)
         fossil.taxa <- NULL
         fix.type <- NULL
         psi.type <- NULL
+        strat.cache <- NULL
     }
     nb.tip <- Ntip(phy)
     nb.node <- phy$Nnode
@@ -154,17 +190,28 @@ MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, conditi
             if(includes.fossils == TRUE){
                 stop("You input a tree that contains fossils but you are assuming no extinction. Check your function call.")
             }else{
-                init.pars <- starting.point.generator(phy, k=1, samp.freq.tree, yule=TRUE)
+                init.pars <- starting.point.generator(phy, k=2, samp.freq.tree, yule=TRUE)
             }
         }else{
             if(includes.fossils == TRUE){
-                init.pars <- starting.point.generator.fossils(n.tax=n.tax.starting, k=1, samp.freq.tree, fossil.taxa=fossil.taxa, fossil.ages=fossil.ages, no.k.samples=no.k.samples, split.times=split.times)
-                psi.start <- init.pars[3]
+                if(!is.null(strat.intervals)){
+                    branch.type = NULL
+                    cols <- c("FocalNode","DesNode", "RootwardAge", "TipwardAge", "branch.type")
+                    seg.map <- dat.tab[, cols, with=FALSE]
+                    #remove k tips -- we do not do anything with them.
+                    setkey(seg.map, branch.type)
+                    #drop the k.tips because we do not do calculation on these zero length edges:
+                    seg.map <- seg.map[branch.type != 2]
+                    init.pars <- starting.point.generator.intervals(k=2, samp.freq.tree, n.tax=n.tax.starting, seg_map=seg.map, split.times=split.times, fossil.ages=fossil.ages, strat.cache=strat.cache)
+                }else{
+                    init.pars <- starting.point.generator.fossils(n.tax=n.tax.starting, k=2, samp.freq.tree, fossil.taxa=fossil.taxa, fossil.ages=fossil.ages, no.k.samples=no.k.samples, split.times=split.times)
+                }
+                psi.start <- init.pars[length(init.pars)]
             }else{
-                init.pars <- starting.point.generator(phy, k=1, samp.freq.tree, yule=FALSE)
+                init.pars <- starting.point.generator(phy, k=2, samp.freq.tree, yule=FALSE)
             }
-            if(init.pars[2] == 0){
-                init.pars[2] = 1e-6
+            if(init.pars[3] == 0){
+                init.pars[3] = 1e-6
             }
         }
         names(init.pars) <- NULL
@@ -173,18 +220,29 @@ MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, conditi
             def.set.pars <- rep(NA, 2*rate.cats)
             scaling=seq(from=1.2, to=0.8, length.out=rate.cats)
             for(cat.index in sequence(rate.cats)) {
-                def.set.pars[1+(cat.index-1)*2] <- log((init.pars[1]+init.pars[2]) * ifelse(length(unique(turnover))==1, 1, scaling[cat.index]))
-                def.set.pars[2+(cat.index-1)*2] <- log(ifelse(length(unique(eps))==1, 1, scaling[cat.index]) * init.pars[2]/init.pars[1])
+                def.set.pars[1+(cat.index-1)*2] <- log((init.pars[1]+init.pars[3]) * ifelse(length(unique(turnover))==1, 1, scaling[cat.index]))
+                def.set.pars[2+(cat.index-1)*2] <- log(ifelse(length(unique(eps))==1, 1, scaling[cat.index]) * init.pars[3]/init.pars[1])
             }
             #def.set.pars <- rep(c(log(init.pars[1]+init.pars[2]), log(init.pars[2]/init.pars[1])), rate.cats)
-            trans.start <- log(rate.cats/sum(phy$edge.length))
+            #trans.start <- log(rate.cats/sum(phy$edge.length))
+            trans.start <- log(init.pars[5])
         }else{
-            ## Check the length of the stating vector:
-            if( length( starting.vals ) != 3 ){
-                stop("Incorrect length for starting.vals vector.")
+            if(includes.fossils == TRUE){
+                ## Check the length of the stating vector:
+                if( length( starting.vals ) != 4 ){
+                    stop("Incorrect length for starting.vals vector.")
+                }
+                def.set.pars <- rep(c(log(starting.vals[1]), log(starting.vals[2])), rate.cats)
+                trans.start <- log(starting.vals[3])
+                psi.start <- log(starting.vals[4])
+            }else{
+                ## Check the length of the stating vector:
+                if( length( starting.vals ) != 3 ){
+                    stop("Incorrect length for starting.vals vector.")
+                }
+                def.set.pars <- rep(c(log(starting.vals[1]), log(starting.vals[2])), rate.cats)
+                trans.start <- log(starting.vals[3])
             }
-            def.set.pars <- rep(c(log(starting.vals[1]), log(starting.vals[2])), rate.cats)
-            trans.start <- log(starting.vals[3])
         }
         
         if(bounded.search == TRUE){
@@ -247,23 +305,26 @@ MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, conditi
         if(bounded.search == TRUE){
             cat("Finished. Beginning bounded subplex routine...", "\n")
             opts <- list("algorithm" = "NLOPT_LN_SBPLX", "maxeval" = 100000, "ftol_rel" = max.tol)
-            out = nloptr(x0=ip, eval_f=DevOptimizeMiSSE, ub=upper, lb=lower, opts=opts, pars=pars, dat.tab=dat.tab, gen=gen, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, np=np, ode.eps=ode.eps, fossil.taxa=fossil.taxa, fix.type=fix.type)
+            out = nloptr(x0=ip, eval_f=DevOptimizeMiSSE, ub=upper, lb=lower, opts=opts, pars=pars, dat.tab=dat.tab, gen=gen, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, np=np, ode.eps=ode.eps, fossil.taxa=fossil.taxa, fix.type=fix.type, strat.cache=strat.cache)
+            sann.counts <- NULL
             solution <- numeric(length(pars))
             solution[] <- c(exp(out$solution), 0)[pars]
             loglik = -out$objective
         }else{
             cat("Finished. Beginning subplex routine...", "\n")
-            out = subplex(ip, fn=DevOptimizeMiSSE, control=list(reltol=max.tol, parscale=rep(0.1, length(ip))), pars=pars, dat.tab=dat.tab, gen=gen, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, np=np, ode.eps=ode.eps, fossil.taxa=fossil.taxa, fix.type=fix.type)
+            out = subplex(ip, fn=DevOptimizeMiSSE, control=list(reltol=max.tol, parscale=rep(0.1, length(ip))), pars=pars, dat.tab=dat.tab, gen=gen, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, np=np, ode.eps=ode.eps, fossil.taxa=fossil.taxa, fix.type=fix.type, strat.cache=strat.cache)
+            sann.counts <- NULL
             solution <- numeric(length(pars))
             solution[] <- c(exp(out$par), 0)[pars]
             loglik = -out$value
         }
     }else{
         cat("Finished. Beginning simulated annealing...", "\n")
-        out.sann = GenSA(ip, fn=DevOptimizeMiSSE, lower=lower, upper=upper, control=list(max.call=sann.its), pars=pars, dat.tab=dat.tab, gen=gen, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, np=np, ode.eps=ode.eps, fossil.taxa=fossil.taxa, fix.type=fix.type)
+        out.sann = GenSA(ip, fn=DevOptimizeMiSSE, lower=log(exp(lower)+0.0000000001), upper=log(exp(upper)-0.0000000001), control=list(max.call=sann.its, temperature=sann.temp, seed=sann.seed), pars=pars, dat.tab=dat.tab, gen=gen, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, np=np, ode.eps=ode.eps, fossil.taxa=fossil.taxa, fix.type=fix.type, strat.cache=strat.cache)
+        sann.counts <- out.sann$counts
         cat("Finished. Refining using subplex routine...", "\n")
         opts <- list("algorithm" = "NLOPT_LN_SBPLX", "maxeval" = 100000, "ftol_rel" = max.tol)
-        out <- nloptr(x0=out.sann$par, eval_f=DevOptimizeMiSSE, ub=upper, lb=lower, opts=opts, pars=pars, dat.tab=dat.tab, gen=gen, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, np=np, ode.eps=ode.eps, fossil.taxa=fossil.taxa, fix.type=fix.type)
+        out <- nloptr(x0=out.sann$par, eval_f=DevOptimizeMiSSE, ub=upper, lb=lower, opts=opts, pars=pars, dat.tab=dat.tab, gen=gen, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, np=np, ode.eps=ode.eps, fossil.taxa=fossil.taxa, fix.type=fix.type, strat.cache=strat.cache)
         solution <- numeric(length(pars))
         solution[] <- c(exp(out$solution), 0)[pars]
         
@@ -274,7 +335,7 @@ MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, conditi
     
     cat("Finished. Summarizing results...", "\n")
     misse_end_time <- Sys.time()
-    obj = list(loglik = loglik, AIC = -2*loglik+2*np, AICc = -2*loglik+(2*np*(Ntip(phy)/(Ntip(phy)-np-1))), solution=solution, index.par=pars, f=f, hidden.states=hidden.states, fixed.eps=fixed.eps, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, phy=phy, max.tol=max.tol, starting.vals=ip, upper.bounds=upper, lower.bounds=lower, ode.eps=ode.eps, turnover=turnover, eps=eps, elapsed.minutes=difftime(misse_end_time, misse_start_time, units="min"), includes.fossils=includes.fossils, k.samples=k.samples, fix.type=fix.type, psi.type=psi.type)
+    obj = list(loglik = loglik, AIC = -2*loglik+2*np, AICc = -2*loglik+(2*np*(Ntip(phy)/(Ntip(phy)-np-1))), solution=solution, index.par=pars, f=f, hidden.states=hidden.states, fixed.eps=fixed.eps, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, phy=phy.og, phy.w.k=phy, max.tol=max.tol, starting.vals=ip, upper.bounds=upper, lower.bounds=lower, ode.eps=ode.eps, turnover=turnover, eps=eps, elapsed.minutes=difftime(misse_end_time, misse_start_time, units="min"), includes.fossils=includes.fossils, k.samples=k.samples, strat.intervals=strat.intervals, fix.type=fix.type, psi.type=psi.type, sann.counts=sann.counts)
     class(obj) <- append(class(obj), "misse.fit")
     return(obj)
 }
@@ -289,21 +350,47 @@ MiSSE <- function(phy, f=1, turnover=c(1,2), eps=c(1,2), fixed.eps=NULL, conditi
 
 # options(error = utils::recover)
 # a <- hisse:::MiSSEGreedyNew(ape::rcoal(50), possible.combos=hisse:::generateMiSSEGreedyCombinations(4), n.cores=4, save.file='~/Downloads/greedy.rda')
-MiSSEGreedy <- function(phy, f=1, possible.combos = generateMiSSEGreedyCombinations(), stop.deltaAICc=10, save.file=NULL, n.cores=NULL, chunk.size=NULL, condition.on.survival=TRUE, root.type="madfitz", root.p=NULL, includes.fossils=FALSE, k.samples=NULL, sann=TRUE, sann.its=10000, bounded.search=TRUE, max.tol=.Machine$double.eps^.50, starting.vals=NULL, turnover.upper=10000, eps.upper=3, trans.upper=100, restart.obj=NULL, ode.eps=0) {
+MiSSEGreedy <- function(phy, f=1, possible.combos = generateMiSSEGreedyCombinations(shuffle.start=TRUE), stop.deltaAICc=10, save.file=NULL, n.cores=NULL, chunk.size=10, check.fits=FALSE, remove.bad=FALSE, n.tries=2, condition.on.survival=TRUE, root.type="madfitz", root.p=NULL, includes.fossils=FALSE, k.samples=NULL, strat.intervals=NULL, sann=TRUE, sann.its=5000, sann.temp=5230, sann.seed=-100377, bounded.search=TRUE, max.tol=.Machine$double.eps^.50, starting.vals=NULL, turnover.upper=10000, eps.upper=3, trans.upper=100, restart.obj=NULL, ode.eps=0) {
     
     misse.list <- list()
     chunk.size <- ifelse(is.null(chunk.size),ifelse(is.null(n.cores),1,n.cores), chunk.size)
     total.chunks <- ceiling(nrow(possible.combos)/chunk.size)
-    possible.combos$lnL <- NA
-    possible.combos$AIC <- NA
-    possible.combos$AICc <- NA
+    possible.combos$runorder <- NA
     possible.combos$deltaAICc <- NA
+    possible.combos$AICc <- NA
+	possible.combos$predictedAICc <- NA
+	possible.combos$lnL <- NA
+    possible.combos$AIC <- NA
     possible.combos$elapsedMinutes <- NA
     possible.combos$predictedMinutes <- NA
+	final.combos <- possible.combos
+	all.examined <- c()
     
     for (batch_index in sequence(total.chunks)) { # So, if we can do parallel, we do it in chunks so all cores are busy
         starting.time <- Sys.time()
-        local.combos <- possible.combos[(1+chunk.size*(batch_index-1)):min(nrow(possible.combos), chunk.size*batch_index) ,]
+		focal.models <- sequence(min(chunk.size, nrow(possible.combos)))
+		if(batch_index>1) {
+            #save(final.combos, possible.combos, file="stufffordebugging.Rsave")
+            #final.combos$predictedAICc <- stats::predict(stats::glm(AICc ~ turnover + eps + turnover*eps, data=subset(final.combos, !is.na(final.combos$AICc))), newdata=final.combos) #Idea here is to focus on the best candidate models
+			
+			model.distances <- as.matrix(dist(final.combos[,c("turnover", "eps")], diag=TRUE, upper=TRUE))
+			unknown.indices <- which(is.na(final.combos$AICc))
+			for(unknown.index in unknown.indices) {
+				model.distances[,unknown.index] <- 1e10	
+			}
+			for (model_index in sequence(nrow(final.combos))) {
+				best <- which(model.distances[model_index,] == min(model.distances[model_index,]))
+				final.combos$predictedAICc[model_index] <- min(final.combos[best, "AICc"]+model.distances[model_index, best], na.rm=TRUE)		
+			}
+			
+            best.ones <- base::order(final.combos$predictedAICc)
+			best.ones <- best.ones[!(best.ones %in% which(!is.na(final.combos$AICc)))]
+			focal.models <- best.ones[1:min(chunk.size, length(best.ones))]
+		}
+        all.examined <- append(all.examined, focal.models)
+		
+        #local.combos <- possible.combos[(1+chunk.size*(batch_index-1)):min(nrow(possible.combos), chunk.size*batch_index) ,]
+		local.combos <- final.combos[focal.models,]
         
         #cat("\nNow starting run with", paste(range(local.combos$turnover), collapse="-"), "turnover categories and", paste(range(local.combos$eps), collapse="-"), "extinction fraction categories", "\n")
         cat("Starting at ", as.character(starting.time), "\n running on ", n.cores, " cores.", sep="")
@@ -324,8 +411,11 @@ MiSSEGreedy <- function(phy, f=1, possible.combos = generateMiSSEGreedyCombinati
         root.p=root.p,
         includes.fossils=includes.fossils,
         k.samples=k.samples,
+        strat.intervals=strat.intervals,
         sann=sann,
         sann.its=sann.its,
+        sann.temp=sann.temp,
+        sann.seed=sann.seed,
         bounded.search=bounded.search,
         max.tol=max.tol,
         starting.vals=starting.vals,
@@ -342,25 +432,36 @@ MiSSEGreedy <- function(phy, f=1, possible.combos = generateMiSSEGreedyCombinati
         
         AICc <- unlist(lapply(misse.list, "[[", "AICc"))
         deltaAICc <- AICc-min(AICc)
-        min.deltaAICc.this.chunk <- min(deltaAICc[(1+chunk.size*(batch_index-1)):min(nrow(possible.combos), chunk.size*batch_index)])
+        min.deltaAICc.this.chunk <- min(deltaAICc[(1+chunk.size*(batch_index-1)):min(nrow(final.combos), chunk.size*batch_index)])
         
-        possible.combos$lnL[1:min(nrow(possible.combos), chunk.size*batch_index)] <- unlist(lapply(misse.list, "[[", "loglik"))
-        possible.combos$AIC[1:min(nrow(possible.combos), chunk.size*batch_index)] <- unlist(lapply(misse.list, "[[", "AIC"))
-        possible.combos$AICc[1:min(nrow(possible.combos), chunk.size*batch_index)] <- AICc
-        possible.combos$deltaAICc[1:min(nrow(possible.combos), chunk.size*batch_index)] <- deltaAICc
-        possible.combos$elapsedMinutes[1:min(nrow(possible.combos), chunk.size*batch_index)] <- unlist(lapply(misse.list, "[[", "elapsed.minutes"))
+        # final.combos$lnL[1:min(nrow(final.combos), chunk.size*batch_index)] <- unlist(lapply(misse.list, "[[", "loglik"))
+        # final.combos$AIC[1:min(nrow(final.combos), chunk.size*batch_index)] <- unlist(lapply(misse.list, "[[", "AIC"))
+        # final.combos$AICc[1:min(nrow(final.combos), chunk.size*batch_index)] <- AICc
+        # final.combos$deltaAICc[1:min(nrow(final.combos), chunk.size*batch_index)] <- deltaAICc
+        # final.combos$elapsedMinutes[1:min(nrow(final.combos), chunk.size*batch_index)] <- unlist(lapply(misse.list, "[[", "elapsed.minutes"))
         
-        data.for.fit <- data.frame(nparam=(possible.combos$eps+possible.combos$turnover)[1:min(nrow(possible.combos), chunk.size*batch_index)], logmin=log(possible.combos$elapsedMinutes[1:min(nrow(possible.combos), chunk.size*batch_index)]))
-        data.for.prediction <- data.frame(nparam=(possible.combos$eps+possible.combos$turnover))
-        suppressWarnings(possible.combos$predictedMinutes <- exp(predict(lm(logmin ~ nparam, data=data.for.fit), newdata=data.for.prediction)))
+        # data.for.fit <- data.frame(nparam=(final.combos$eps+possible.combos$turnover)[1:min(nrow(final.combos), chunk.size*batch_index)], logmin=log(final.combos$elapsedMinutes[1:min(nrow(final.combos), chunk.size*batch_index)]))
+        # data.for.prediction <- data.frame(nparam=(final.combos$eps+final.combos$turnover))
+
+        final.combos$lnL[all.examined] <- unlist(lapply(misse.list, "[[", "loglik"))
+        final.combos$AIC[all.examined] <- unlist(lapply(misse.list, "[[", "AIC"))
+        final.combos$AICc[all.examined] <- AICc
+        final.combos$deltaAICc[all.examined] <- deltaAICc
+        final.combos$elapsedMinutes[all.examined] <- unlist(lapply(misse.list, "[[", "elapsed.minutes"))
+		final.combos$runorder[focal.models] <- batch_index
+        
+        data.for.fit <- data.frame(nparam=(final.combos$eps+final.combos$turnover)[all.examined], logmin=log(final.combos$elapsedMinutes[all.examined]))
+        data.for.prediction <- data.frame(nparam=(final.combos$eps+final.combos$turnover))
+
+        suppressWarnings(final.combos$predictedMinutes <- exp(predict(lm(logmin ~ nparam, data=data.for.fit), newdata=data.for.prediction)))
         
         cat("\nResults so far\n")
-        print(round(possible.combos,2))
+        final.combos[] <- lapply(final.combos, function(x) { if(!is.numeric(x)) as.numeric(x) else x })
+        print(round(final.combos,2))
         
         if(!is.null(save.file)) {
-            save(misse.list, possible.combos, file=save.file)
+            save(misse.list, final.combos, file=save.file)
         }
-        
         
         if(batch_index<total.chunks) {
             if(stop.deltaAICc>min.deltaAICc.this.chunk) {
@@ -396,11 +497,78 @@ MiSSEGreedy <- function(phy, f=1, possible.combos = generateMiSSEGreedyCombinati
         #         expand.mode=TRUE
         # ))
     }
-    return(misse.list)
+
+    if(check.fits == TRUE){
+        cat("Checking model fits...", "\n")
+        misse.list.updated <- MiSSENet(misse.list=misse.list, n.tries=n.tries, remove.bad=remove.bad, dont.rerun=FALSE, save.file=save.file, n.cores=ifelse(is.null(n.cores),1,n.cores), sann=sann, sann.its=sann.its, sann.temp=sann.temp, bounded.search=bounded.search, starting.vals=starting.vals, turnover.upper=turnover.upper, eps.upper=eps.upper, trans.upper=trans.upper, restart.obj=restart.obj)
+        return(misse.list.updated)
+    }else{
+        if(remove.bad == TRUE){
+            misse.list.updated <- MiSSENet(misse.list=misse.list, n.tries=n.tries, remove.bad=remove.bad, dont.rerun=TRUE, save.file=save.file, n.cores=ifelse(is.null(n.cores),1,n.cores), sann=sann, sann.its=sann.its, sann.temp=sann.temp, bounded.search=bounded.search, starting.vals=starting.vals, turnover.upper=turnover.upper, eps.upper=eps.upper, trans.upper=trans.upper, restart.obj=restart.obj)
+            return(misse.list.updated)
+        }else{
+            return(misse.list)
+        }
+    }
+}
+
+SummarizeMiSSEGreedy <- function(greedy.result, min.weight=0.01, n.cores=1, recon=TRUE) {
+	parameters <- c("turnover", "net.div", "speciation", "extinction", "extinction.fraction")
+	AICc_weights <- GetAICWeights(greedy.result, criterion="AICc")
+	good_enough <- which(AICc_weights>min.weight)
+	best_model <- which.max(AICc_weights)
+	rates <- NA
+	if(recon) {
+		recons <- list()
+		rates <- array(dim=c(ape::Ntip(greedy.result[[1]]$phy) + ape::Nnode(greedy.result[[1]]$phy), length(parameters), length(good_enough)+2), dimnames=list(c(greedy.result[[1]]$phy$tip.label, (1+ape::Ntip(greedy.result[[1]]$phy)):(ape::Ntip(greedy.result[[1]]$phy) + ape::Nnode(greedy.result[[1]]$phy))), parameters, c(good_enough, "model_average", "best")))
+		for(i in sequence(length(good_enough))){
+			local_model <- greedy.result[[good_enough[i]]]
+			
+			recons[[i]] <- MarginReconMiSSE(phy=local_model$phy, f=local_model$f, pars=local_model$solution[local_model$index.par], hidden.states=local_model$hidden.states, fixed.eps=local_model$fixed.eps, condition.on.survival=local_model$condition.on.survival, root.type=local_model$root.type, root.p=local_model$root.p, includes.fossils=local_model$includes.fossils, k.samples=local_model$k.samples, strat.intervals=local_model$strat.intervals, AIC=local_model$AICc, get.tips.only=FALSE, verbose=FALSE, n.cores=n.cores)
+		}
+
+		for(param_index in sequence(length(parameters))) {
+			rate.param <- parameters[param_index]
+			for(i in sequence(length(good_enough))){
+				rates.tips <- ConvertManyToRate(recons[i], rate.param, "tip.mat")
+				rates.internal <- ConvertManyToRate(recons[i], rate.param, "node.mat")
+				rates[,param_index,i] <- c(rates.tips, rates.internal)
+				if(good_enough[i]==best_model) {
+					rates[,param_index,2+length(good_enough)] <- c(rates.tips, rates.internal)
+				}
+				
+			}
+			rates.tips.avg <- ConvertManyToRate(recons, rate.param, "tip.mat")
+			rates.internal.avg <- ConvertManyToRate(recons, rate.param, "node.mat")
+			rates[,param_index,1+length(good_enough)] <- c(rates.tips.avg, rates.internal.avg)
+		}
+	}
+	overview <- data.frame(model_number=sequence(length(greedy.result)))
+	overview$lnL <- unlist(lapply(greedy.result, "[[", "loglik"))
+	overview$AICc <- unlist(lapply(greedy.result, "[[", "AICc"))
+	overview$deltaAICc <- overview$AICc-min(overview$AICc)
+	overview$AIC <- unlist(lapply(greedy.result, "[[", "AIC"))
+	overview$hidden.states <- unlist(lapply(greedy.result, "[[", "hidden.states"))
+	overview$n.turnover <- NA
+	overview$n.eps <- NA
+	overview$n.transition_rate <- 1
+	overview$n.freeparam <- NA
+	for(i in sequence(length(greedy.result))) {
+		overview$n.turnover[i] <- max(greedy.result[[i]]$turnover)
+		overview$n.eps[i] <- max(greedy.result[[i]]$eps)
+		overview$n.freeparam[i] <- overview$n.turnover[i]+overview$n.eps[i]+1
+	}
+	overview$AICc_weights <- AICc_weights
+	overview$Included_In_Model_Average <- FALSE
+	overview$Included_In_Model_Average[good_enough] <- TRUE
+	overview$elapsed.minutes <- unlist(lapply(greedy.result, "[[", "elapsed.minutes"))
+
+	return(list(overview=overview, rates=rates))
 }
 
 
-generateMiSSEGreedyCombinations <- function(max.param=52, turnover.tries=sequence(26), eps.tries=sequence(26), fixed.eps.tries=c(0, 0.9, NA), vary.both=TRUE) {
+
+generateMiSSEGreedyCombinations <- function(max.param=52, turnover.tries=sequence(26), eps.tries=sequence(26), fixed.eps.tries=NA, vary.both=TRUE, shuffle.start=TRUE) {
     fixed.eps <- eps <- "CRAN wants this declared somehow"
     if(vary.both) {
         combos <- expand.grid(turnover=turnover.tries, eps=eps.tries, fixed.eps=fixed.eps.tries)
@@ -415,7 +583,11 @@ generateMiSSEGreedyCombinations <- function(max.param=52, turnover.tries=sequenc
     combos <- subset(combos, eps==0 | is.na(fixed.eps)) # Don't estimate multiple eps while also fixing eps
     combos <- combos[!duplicated(combos),]
     combos <- combos[which(combos$turnover + combos$eps <= max.param),]
-    combos <- combos[order(combos$turnover + combos$eps, decreasing=FALSE),]
+    combos <- combos[base::order(combos$eps, combos$turnover, decreasing=FALSE),]
+    if(shuffle.start) {
+        model_pref <- 1/(combos$turnover + 2*combos$eps)^4 #reorder with weight on simplest ones first
+        combos <- combos[sample.int(n=nrow(combos), prob=model_pref, replace=FALSE), ]
+    }
     rownames(combos) <- NULL
     return(combos)
 }
@@ -475,14 +647,18 @@ MiSSEGreedyOLD <- function(phy, f=1, turnover.tries=sequence(26), eps.constant=c
 ######################################################################################################################################
 ######################################################################################################################################
 
-DevOptimizeMiSSE <- function(p, pars, dat.tab, gen, hidden.states, fixed.eps, nb.tip, nb.node, condition.on.survival, root.type, root.p, np, ode.eps, fossil.taxa, fix.type) {
+DevOptimizeMiSSE <- function(p, pars, dat.tab, gen, hidden.states, fixed.eps, nb.tip, nb.node, condition.on.survival, root.type, root.p, np, ode.eps, fossil.taxa, fix.type, strat.cache) {
     #Generates the final vector with the appropriate parameter estimates in the right place:
     p.new <- exp(p)
     model.vec <- numeric(length(pars))
     model.vec[] <- c(p.new, 0)[pars]
     cache <- ParametersToPassMiSSE(model.vec=model.vec, hidden.states=hidden.states, fixed.eps=fixed.eps, nb.tip=nb.tip, nb.node=nb.node, bad.likelihood=exp(-300), ode.eps=ode.eps)
     if(!is.null(fix.type)){
-        logl <- DownPassMisse(dat.tab=dat.tab, gen=gen, cache=cache, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, node=fix.type[,1], state=NULL, fossil.taxa=fossil.taxa, fix.type=fix.type[,2])
+        if(!is.null(strat.cache)){
+            logl <- DownPassMisse(dat.tab=dat.tab, gen=gen, cache=cache, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, node=fix.type[,1], state=NULL, fossil.taxa=fossil.taxa, fix.type=fix.type[,2]) + (strat.cache$k*log(cache$psi)) + (cache$psi*strat.cache$l_s)
+        }else{
+            logl <- DownPassMisse(dat.tab=dat.tab, gen=gen, cache=cache, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, node=fix.type[,1], state=NULL, fossil.taxa=fossil.taxa, fix.type=fix.type[,2])
+        }
     }else{
         logl <- DownPassMisse(dat.tab=dat.tab, gen=gen, cache=cache, condition.on.survival=condition.on.survival, root.type=root.type, root.p=root.p, node=NULL, fossil.taxa=fossil.taxa, fix.type=NULL)
     }
@@ -514,7 +690,87 @@ GetTreeTable <- function(phy, root.age=NULL){
 }
 
 
-OrganizeDataMiSSE <- function(phy, f, hidden.states, includes.fossils=FALSE){
+GetEdgeDetails <- function(phy, includes.intervals=FALSE, intervening.intervals=NULL){
+    table.info <- GetTreeTable(phy, root.age=NULL)
+    edges_detail <- as.data.frame(table.info)
+    colnames(edges_detail) <- c("rootward_age", "tipward_age", "edge.length", "rootward_node", "tipward_node")
+    edges_detail$type <- "internal"
+    edges_detail$type[which(edges_detail$tipward_node<=ape::Ntip(phy))] <- "extant_tip"
+    for(row.index in 1:dim(table.info)[1]){
+        if(table.info[row.index,5]<=ape::Ntip(phy)){
+            if(table.info[row.index,2] > .Machine$double.eps^.50){
+                edges_detail$type[row.index] <- "extinct_tip"
+            }
+        }
+    }
+    edges_detail$type[which(edges_detail$tipward_node %in% which(grepl("Ksamp_",phy$tip.label)))] <- "k_tip"
+
+    if(includes.intervals == TRUE){
+        Ksamples_rootward_nodes <- edges_detail$rootward_node[which(edges_detail$type=="k_tip")]
+        Extinct_tipward_nodes <- edges_detail$tipward_node[which(edges_detail$type=="extinct_tip")]
+        Extant_tipward_nodes <- edges_detail$tipward_node[which(edges_detail$type=="extant_tip")]
+        tipwards_nodes_of_rootwards_nodes <- edges_detail$tipward_node[edges_detail$rootward_node %in% Ksamples_rootward_nodes]
+        for(rootward_focal in Ksamples_rootward_nodes) {
+            focal_rows <- which(edges_detail$rootward_node == rootward_focal)
+            for(row_index in focal_rows) {
+                ###For k --> k
+                if(edges_detail$tipward_node[row_index] %in% Ksamples_rootward_nodes) {
+                    edges_detail$type[row_index] <- "k_k_interval"
+                }
+                ###For k --> extinct
+                if(edges_detail$tipward_node[row_index] %in% Extinct_tipward_nodes) {
+                    edges_detail$type[row_index] <- "k_extinct_interval"
+                }
+                ###For k --> extant
+                if(edges_detail$tipward_node[row_index] %in% Extant_tipward_nodes) {
+                    edges_detail$type[row_index] <- "k_extant_interval"
+                }
+            }
+        }
+        
+        #First go and find the intervening intervals. Should be k_k_intervals, so use intervening interval table to find and replace:
+        if(!is.null(intervening.intervals)){
+            tmp <- which(round(edges_detail$tipward_age,10) %in% round(intervening.intervals$o_i,10))
+            for(match.index in 1:length(tmp)){
+                if(edges_detail[tmp[match.index],]$type == "k_k_interval"){
+                    edges_detail[tmp[match.index],]$type <- "intervening_interval"
+                }
+            }
+        }
+        
+        #Next, check any tip intervals that are actually subtended by a k_k interval:
+        for(check.index in 1:dim(edges_detail)[1]){
+            if(edges_detail$type[check.index] == "k_extant_interval"){
+                sister.taxa <- GetSister(phy, edges_detail$rootward_node[check.index])
+                if(edges_detail$type[which(edges_detail$tipward_node==sister.taxa)] == "k_tip"){
+                    rootward.of.sister.taxa <- edges_detail$rootward_node[which(edges_detail$tipward_node==sister.taxa)]
+                    tmp <- edges_detail[which(edges_detail$rootward_node==rootward.of.sister.taxa),]
+                    if(any(tmp$type == "k_k_interval")){
+                        edges_detail$type[check.index] <- "extant_tip"
+                    }
+                }
+            }
+        }
+
+        #Finally, check any extinct tip intervals that are actually subtended by a k_k interval:
+        for(check.index in 1:dim(edges_detail)[1]){
+            if(edges_detail$type[check.index] == "k_extinct_interval"){
+                sister.taxa <- GetSister(phy, edges_detail$rootward_node[check.index])
+                if(edges_detail$type[which(edges_detail$tipward_node==sister.taxa)] == "k_tip"){
+                    rootward.of.sister.taxa <- edges_detail$rootward_node[which(edges_detail$tipward_node==sister.taxa)]
+                    tmp <- edges_detail[which(edges_detail$rootward_node==rootward.of.sister.taxa),]
+                    if(any(tmp$type == "k_k_interval")){
+                        edges_detail$type[check.index] <- "extinct_tip"
+                    }
+                }
+            }
+        }
+    }
+    return(edges_detail)
+}
+
+
+OrganizeDataMiSSE <- function(phy, f, hidden.states, includes.intervals=FALSE, intervening.intervals=NULL, includes.fossils=FALSE){
     ### Ughy McUgherson. This is a must in order to pass CRAN checks: http://stackoverflow.com/questions/9439256/how-can-i-handle-r-cmd-check-no-visible-binding-for-global-variable-notes-when
     DesNode = NULL
     
@@ -537,23 +793,23 @@ OrganizeDataMiSSE <- function(phy, f, hidden.states, includes.fossils=FALSE){
         }
     }
     
-    table.info <- GetTreeTable(phy, root.age=NULL)
-    k.sample.tip.no <- grep("Ksamp*", x=phy$tip.label)
-    branch.type <- rep(0, dim(table.info)[1])
-    for(row.index in 1:dim(table.info)[1]){
-        if(table.info[row.index,5]<=nb.tip){
-            if(table.info[row.index,2] > .Machine$double.eps^.50){
-                if(includes.fossils==TRUE){
-                    branch.type[row.index] <- 1
-                }
-            }
-            if(any(phy$edge[row.index,2]==k.sample.tip.no)){
-                branch.type[row.index] <- 2
-            }
-        }
+    #This seems stupid but I cannot figure out how to get data.table to not make this column a factor. When a factor this is not right. For posterity, let it be known Jeremy would rather just retain the character instead of this mess:
+    edge_details <- GetEdgeDetails(phy, includes.intervals=includes.intervals, intervening.intervals=intervening.intervals)
+    if(includes.fossils == TRUE){
+        branch.type <- edge_details$type
+        branch.type[which(branch.type == "extant_tip")] <- 0
+        branch.type[which(branch.type == "internal")] <- 0
+        branch.type[which(branch.type == "extinct_tip")] <- 1
+        branch.type[which(branch.type == "k_tip")] <- 2
+        branch.type[which(branch.type == "k_k_interval")] <- 3
+        branch.type[which(branch.type == "k_extinct_interval")] <- 3
+        branch.type[which(branch.type == "k_extant_interval")] <- 3
+        branch.type[which(branch.type == "intervening_interval")] <- 4
+    }else{
+        branch.type <- rep(0, length(edge_details$type))
     }
     
-    tmp.df <- cbind(table.info, 0, matrix(0, nrow(table.info), ncol(compD)), matrix(0, nrow(table.info), ncol(compE)), branch.type)
+    tmp.df <- cbind(edge_details[,1:5], 0, matrix(0, nrow(edge_details), ncol(compD)), matrix(0, nrow(edge_details), ncol(compE)), as.numeric(branch.type))
     colnames(tmp.df) <- c("RootwardAge", "TipwardAge", "BranchLength", "FocalNode", "DesNode", "comp", paste("compD", 1:ncol(compD), sep="_"), paste("compE", 1:ncol(compE), sep="_"), "branch.type")
     dat.tab <- as.data.table(tmp.df)
     setkey(dat.tab, DesNode)
@@ -582,15 +838,19 @@ SingleChildProbMiSSE <- function(cache, pars, compD, compE, start.time, end.time
     }else{
         times=c(start.time, end.time)
     }
-    runSilent <- function() {
+    runSilent <- function(branch.type) {
         options(warn = -1)
         on.exit(options(warn = 0))
-        capture.output(res <- lsoda(yini, times, func = "misse_derivs", pars, initfunc="initmod_misse", dllname = "hisse", rtol=1e-10, atol=1e-10))
+        if(branch.type == 3){
+            capture.output(res <- lsoda(yini, times, func = "misse_strat_derivs", pars, initfunc="initmod_misse", dllname = "hisse", rtol=1e-8, atol=1e-8))
+        }else{
+            capture.output(res <- lsoda(yini, times, func = "misse_derivs", pars, initfunc="initmod_misse", dllname = "hisse", rtol=1e-8, atol=1e-8))
+        }
         res
     }
     #prob.subtree.cal.full <- lsoda(yini, times, func = "misse_derivs", pars, initfunc="initmod_misse", dll = "misse-ext-derivs", rtol=1e-8, atol=1e-8)
     #prob.subtree.cal.full <- lsoda(yini, times, func = "misse_derivs", pars, initfunc="initmod_misse", dllname = "hisse", rtol=1e-8, atol=1e-8)
-    prob.subtree.cal.full <- runSilent()
+    prob.subtree.cal.full <- runSilent(branch.type=branch.type)
     
     ######## THIS CHECKS TO ENSURE THAT THE INTEGRATION WAS SUCCESSFUL ###########
     if(attributes(prob.subtree.cal.full)$istate[1] < 0){
@@ -603,7 +863,17 @@ SingleChildProbMiSSE <- function(cache, pars, compD, compE, start.time, end.time
             #So, what this does is simply maintains the original input which here should just be a bunch of ones.
             prob.subtree.cal[27:52] <- compD
         }else{
-            prob.subtree.cal <- prob.subtree.cal.full[-1,-1]
+            if(branch.type == 4){
+                prob.subtree.cal.wevents <- prob.subtree.cal.full[-1,-1]
+                prob.subtree.cal.full <- runSilent(branch.type=3)
+                prob.subtree.cal.noevents <- prob.subtree.cal.full[-1,-1]
+                unobs.spec.probs <- 1 - (prob.subtree.cal.noevents[27:52]/prob.subtree.cal.wevents[27:52])
+                prob.subtree.cal.wevents[27:52] <- prob.subtree.cal.wevents[27:52] * unobs.spec.probs
+                prob.subtree.cal.wevents[which(is.na(prob.subtree.cal.wevents))] <- 0
+                prob.subtree.cal <- prob.subtree.cal.wevents
+            }else{
+                prob.subtree.cal <- prob.subtree.cal.full[-1,-1]
+            }
         }
     }
     ##############################################################################
@@ -649,15 +919,22 @@ FocalNodeProbMiSSE <- function(cache, pars, lambdas, dat.tab, generations){
                     #The initial condition for a k.sample is D(t)*psi
                     v.mat[which(generations == cache$node[fix.index]),] <- (v.mat[which(generations == cache$node[fix.index]),] / lambdas.check) * cache$psi
                 }else{
-                    fixer = numeric(26)
-                    fixer[cache$state] = 1
-                    v.mat[which(generations == cache$node[fix.index]),] <- v.mat[which(generations == cache$node[fix.index]),] * fixer
+                    if(cache$fix.type[fix.index] == "interval"){
+                        lambdas.check <- lambdas
+                        lambdas.check[which(lambdas==0)] <- 1
+                        v.mat[which(generations == cache$node[fix.index]),] <- v.mat[which(generations == cache$node[fix.index]),] / lambdas.check
+                    }else{
+                        fixer = numeric(26)
+                        fixer[cache$state] = 1
+                        v.mat[which(generations == cache$node[fix.index]),] <- v.mat[which(generations == cache$node[fix.index]),] * fixer
+                    }
                 }
             }
         }
     }
     tmp.comp <- rowSums(v.mat)
     tmp.probs <- v.mat / tmp.comp
+    #tmp.probs <- v.mat
     setkey(dat.tab, DesNode)
     rows <- dat.tab[.(generations), which=TRUE]
     cols <- names(dat.tab)
@@ -693,9 +970,16 @@ GetRootProbMiSSE <- function(cache, pars, lambdas, dat.tab, generations){
                     #The initial condition for a k.sample is D(t)*psi
                     v.mat[which(generations == cache$node[fix.index]),] <- (v.mat[which(generations == cache$node[fix.index]),] / lambdas.check) * cache$psi
                 }else{
-                    fixer = numeric(26)
-                    fixer[cache$state] = 1
-                    v.mat[which(generations == cache$node[fix.index]),] <- v.mat[which(generations == cache$node[fix.index]),] * fixer
+                    if(cache$fix.type[fix.index] == "interval"){
+                        #basically we are using the node to fix the state along a branch, but we do not want to assume a true speciation event occurred here.
+                        lambdas.check <- lambdas
+                        lambdas.check[which(lambdas==0)] <- 1
+                        v.mat[which(generations == cache$node[fix.index]),] <- v.mat[which(generations == cache$node[fix.index]),] / lambdas.check
+                    }else{
+                        fixer = numeric(26)
+                        fixer[cache$state] = 1
+                        v.mat[which(generations == cache$node[fix.index]),] <- v.mat[which(generations == cache$node[fix.index]),] * fixer
+                    }
                 }
             }
         }
@@ -703,7 +987,8 @@ GetRootProbMiSSE <- function(cache, pars, lambdas, dat.tab, generations){
     
     tmp.comp <- rowSums(v.mat)
     tmp.probs <- v.mat / tmp.comp
-    
+    #tmp.probs <- v.mat
+
     return(cbind(tmp.comp, phi.mat, tmp.probs))
 }
 
@@ -717,7 +1002,7 @@ GetFossilInitialsMiSSE <- function(cache, pars, lambdas, dat.tab, fossil.taxa){
     fossils <- data.table(c(fossil.taxa))
     setkey(dat.tab, DesNode)
     CurrentGenData <- dat.tab[fossils]
-    tmp <- t(apply(CurrentGenData, 1, function(z) SingleChildProbMiSSE(cache, pars, z[7:32], z[33:58],  0, z[2], z[59])))
+    tmp <- t(apply(CurrentGenData, 1, function(z) SingleChildProbMiSSE(cache, pars, z[7:32], z[33:58], 0, z[2], 1)))
     tmp.probs <- matrix(tmp[,1:26], length(fossil.taxa), 26) * as.matrix(CurrentGenData[,7:32]) * cache$psi
     phi.mat <- matrix(tmp[,1:26], length(fossil.taxa), 26)
     setkey(dat.tab, DesNode)
@@ -799,14 +1084,16 @@ DownPassMisse <- function(dat.tab, gen, cache, condition.on.survival, root.type,
             }
         }
     }
-    
+        
     if(!is.null(fossil.taxa)){
-        pars[length(pars)] <- 0
-        cache$psi <- 0
-        phi.mat <- SingleChildProbMiSSE(cache, pars, c(as.matrix(dat.tab[1,7:32])), c(as.matrix(dat.tab[1, 33:58])),  0, max(dat.tab$RootwardAge), 0)
-        compE.root <- matrix(phi.mat[1:26], 1, 26)
+        #this overrides the post order traversal E and recalculates assuming psi=0. See pg. 400 Stadler 2010.
+        #if(all(fix.type == "event")){ ## not sure yet for intervals. This is unclear in Stadler et al 2018.
+            pars[length(pars)] <- 0
+            cache$psi <- 0
+            phi.mat <- SingleChildProbMiSSE(cache, pars, c(as.matrix(dat.tab[1,7:32])), c(as.matrix(dat.tab[1, 33:58])),  0, max(dat.tab$RootwardAge), 0)
+            compE.root <- matrix(phi.mat[1:26], 1, 26)
+        #}
     }
-    
     if (is.na(sum(log(compD.root))) || is.na(log(sum(1-compE.root)))){
         return(log(cache$bad.likelihood)^13)
     }else{
@@ -823,6 +1110,7 @@ DownPassMisse <- function(dat.tab, gen, cache, condition.on.survival, root.type,
                 #Corrects for possibility that you have 0/0:
                 compD.root[which(is.na(compD.root))] = 0
                 loglik <- log(sum(compD.root * root.p)) + sum(log(comp))
+                #loglik <- log(sum(compD.root * root.p))
             }else{
                 #lambda <- c(cache$lambda0A, cache$lambda0B, cache$lambda0C, cache$lambda0D, cache$lambda0E, cache$lambda0F, cache$lambda0G, cache$lambda0H, cache$lambda0I, cache$lambda0J, cache$lambda0K, cache$lambda0L, cache$lambda0M, cache$lambda0N, cache$lambda0O, cache$lambda0P, cache$lambda0Q, cache$lambda0R, cache$lambda0S, cache$lambda0T, cache$lambda0U, cache$lambda0V, cache$lambda0W, cache$lambda0X, cache$lambda0Y, cache$lambda0Z)
                 compD.root <- (compD.root * root.p) / (lambda * (1 - compE.root)^2)
@@ -1105,8 +1393,12 @@ print.misse.fit <- function(x,...){
     if(!is.null(x$psi.type)){
         if(x$psi.type == "m_only"){
             cat("psi estimate reflects fossil tip sampling only. \n")
-        }else{
+        }
+        if(x$psi.type == "m+k"){
             cat("psi estimate reflects both fossil edge and tip sampling. \n")
+        }
+        if(x$psi.type == "m+int"){
+            cat("psi estimate reflects stratigraphic interval sampling. \n")
         }
     }
 }

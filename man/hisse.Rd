@@ -1,3 +1,4 @@
+
 \name{hisse}
 \alias{hisse}
 \title{Hidden State Speciation and Extinction}
@@ -6,19 +7,16 @@ on a phylogeny and character distribution.}
 \usage{
 hisse(phy, data, f=c(1,1), turnover=c(1,2), eps=c(1,2), 
 hidden.states=FALSE, trans.rate=NULL, condition.on.survival=TRUE, 
-root.type="madfitz", root.p=NULL, includes.fossils=FALSE, k.samples=NULL, sann=TRUE, 
-sann.its=1000, bounded.search=TRUE, max.tol=.Machine$double.eps^.50, starting.vals=NULL, 
-turnover.upper=10000, eps.upper=3, trans.upper=100, restart.obj=NULL, ode.eps=0, 
-dt.threads=1)
+root.type="madfitz", root.p=NULL, includes.fossils=FALSE, k.samples=NULL, 
+strat.intervals=NULL, sann=TRUE, sann.its=5000, bounded.search=TRUE, 
+max.tol=.Machine$double.eps^.50, starting.vals=NULL, turnover.upper=10000, eps.upper=3,
+trans.upper=100, restart.obj=NULL, ode.eps=0, dt.threads=1)
 }       
 \arguments{
-\item{phy}{a phylogenetic tree, in \code{ape} \dQuote{phylo} format and
-  with internal nodes labeled denoting the ancestral selective regimes.}
-\item{data}{a matrix (or dataframe) with three columns. The first column 
-  containing the species names and the second and third containing the binary 
-  character information. Character "0" is on column 2 and chracter "1" is on 
-  column 3. A value of 0 means character absent and a value of 1 character 
-  present. The input of data follows a Pagel model. See 'Details'.}
+\item{phy}{a phylogenetic tree, in \code{ape} \dQuote{phylo} format.}
+\item{data}{a matrix (or dataframe) with two columns. The first column 
+  containing the species names and the second contains the binary 
+  character information. See 'Details'.}
 \item{f}{vector of length 2 with the estimated proportion of extant species in 
   state 0 and 1 that are included in the phylogeny. A value of c(0.25, 0.5) means 
   that 25 percent of species in state 0 and 50 percent of species in state 1 are 
@@ -40,6 +38,7 @@ dt.threads=1)
   default is \code{NULL}.}
 \item{includes.fossils}{a logical indicating whether the tree contains fossil taxa. The default is \code{FALSE}.}
 \item{k.samples}{a table of extinct individuals with sampled descendants. See details for how the table must be formatted.}
+\item{strat.intervals}{a table of extinct individuals with sampled descendants. See vignette for how the table must be formatted.}
 \item{sann}{a logical indicating whether a two-step optimization
   procedure is to be used. The first includes a simulate annealing
   approach, with the second involving a refinement using
